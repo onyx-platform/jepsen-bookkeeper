@@ -11,7 +11,7 @@ BASE_PATH=$(cd "$(dirname "$0")"; pwd)"/.."
 
 docker rm $(docker ps -a |grep jepsen|cut -f 1 -d ' ') || true
 
-lein clean && lein with-profile uberjar uberjar
+#lein clean && lein with-profile uberjar uberjar
 
 # Share the onyx-jepsen code, and m2 directory (so we don't have to redownload jars every time)
 

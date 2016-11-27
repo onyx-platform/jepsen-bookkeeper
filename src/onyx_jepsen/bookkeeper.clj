@@ -8,10 +8,16 @@
             [clojure.pprint :refer [pprint]]
 
             ;; Onyx!
+            [onyx.static.default-vals :refer [arg-or-default defaults]]
             [onyx.state.log.bookkeeper :as obk]
             [onyx.compression.nippy :as nippy]                                                                                                             
             [knossos.op :as op]
             [jepsen.control.util]
+
+            ;; debian hackery
+            [jepsen.os :as os]
+            [jepsen.control.net :as net]
+
             [jepsen [client :as client]
              [core :as jepsen]
              [model :as model]
@@ -26,13 +32,13 @@
             [jepsen.control.net :as cn]
             [jepsen.os.debian :as debian])
 
-  (:import [org.apache.bookkeeper.client LedgerHandle LedgerEntry BookKeeper BookKeeper$DigestType AsyncCallback$AddCallback]))
+  (:import [org.apache.bookkeeper.client LedgerHandle LedgerEntry BookKeeper BookKeeper$DigestType AsyncCallback$AddCallback BKException BKException$Code AsyncCallback$AddCallback]
+           [org.apache.bookkeeper.conf ClientConfiguration]
+           [org.apache.curator.framework CuratorFramework CuratorFrameworkFactory]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; BookKeeper only test code
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(def version "0.8.0")
 
 (defn zk-node-ids
   "We number nodes in reverse order so the leader is the first node. Returns a
@@ -77,58 +83,48 @@
     (setup! [_ test node]
 
       (c/su
-        ;; bookkeeper threw some exceptions because hostname wasn't set correctly?
-        (c/exec "hostname" (name node))
+       ;; bookkeeper threw some exceptions because hostname wasn't set correctly?
+       (c/exec "hostname" (name node))
 
-        (c/exec :apt-get :update)
-        (info node "Uploading peers")
-        (c/upload "onyx-peers/target/onyx-peers-0.1.0-SNAPSHOT-standalone.jar" "/onyx-peers.jar")
-        (c/upload "script/run-peers.sh" "/run-peers.sh")
-        (c/exec :chmod "+x" "/run-peers.sh")
+       (c/exec :apt-get :update)
 
-        (comment 
-          ;; Disable non-embedded BookKeeper
-          (c/upload "bookkeeper-server-4.3.1-bin.tar.gz" "/bookkeeper.tar.gz")
-          (c/exec :tar "zxvf" "/bookkeeper.tar.gz")
-          (c/exec :mv "bookkeeper-server-4.3.1" "/bookkeeper-server"))
+       ;; Disable non-embedded BookKeeper
+       (c/upload "bookkeeper-server-4.4.0-bin.tar.gz" "/bookkeeper.tar.gz")
+       (c/exec :tar "zxvf" "/bookkeeper.tar.gz")
+       (c/exec :mv "bookkeeper-server-4.4.0" "/bookkeeper-server")
 
-        (c/upload "script/upgrade-java.sh" "/upgrade-java.sh")
-        (c/exec :chmod "+x" "/upgrade-java.sh")
-        (info node "Upgrading java")
-        (c/exec "/upgrade-java.sh")
-        (info node "Done upgrading java")
+       (c/upload "script/upgrade-java.sh" "/upgrade-java.sh")
+       (c/exec :chmod "+x" "/upgrade-java.sh")
+       (info node "Upgrading java")
+       (c/exec "/upgrade-java.sh")
+       (info node "Done upgrading java")
 
-        (info node "Setting up ZK")
-        ; Install zookeeper
-        (debian/install [:zookeeper :zookeeper-bin :zookeeperd])
+       (info node "Setting up ZK")
+       ; Install zookeeper
+       (debian/install [:zookeeper :zookeeper-bin :zookeeperd])
 
-        ; Set up zookeeper
-        (c/exec :echo (zk-node-id test node) :> "/etc/zookeeper/conf/myid")
-        (c/exec :echo (str (slurp (io/resource "zoo.cfg"))
-                           "\n"
-                           (zoo-cfg-servers test))
-                :> "/etc/zookeeper/conf/zoo.cfg")
+       ; Set up zookeeper
+       (c/exec :echo (zk-node-id test node) :> "/etc/zookeeper/conf/myid")
+       (c/exec :echo (str (slurp (io/resource "zoo.cfg"))
+                          "\n"
+                          (zoo-cfg-servers test))
+               :> "/etc/zookeeper/conf/zoo.cfg")
 
-        (info node "ZK restarting")
-        (c/exec :service :zookeeper :restart)
-        
-        (comment 
-          ;; Disable non-embedded BookKeeper
-          (c/exec :echo (str (slurp (io/resource "bk_server.conf"))
-                                    "\n"
-                                    (bk-cfg-servers test)
-                                    "\n"
-                                    bk-ledger-path)
-                         :> "/bookkeeper-server/conf/bk_server.conf")                                                                                                               
-                 (info node "starting bookkeeper")
-                 (c/exec :echo "N" | "/bookkeeper-server/bin/bookkeeper" "shell" "metaformat" || "true")
-                 (c/exec "/bookkeeper-server/bin/bookkeeper-daemon.sh" "start" "bookie"))
+       (info node "ZK restarting")
+       (c/exec :service :zookeeper :restart)
 
+       ;; Disable non-embedded BookKeeper
+       (c/exec :echo (str (slurp (io/resource "bk_server.conf"))
+                          "\n"
+                          (bk-cfg-servers test)
+                          "\n"
+                          bk-ledger-path)
+               :> "/bookkeeper-server/conf/bk_server.conf")                                                                                                               
+       (info node "starting bookkeeper")
+       (c/exec :echo "N" | "/bookkeeper-server/bin/bookkeeper" "shell" "metaformat" || "true")
+       (c/exec "/bookkeeper-server/bin/bookkeeper-daemon.sh" "start" "bookie")
 
-        (info node "Running peers")
-        (c/exec "/run-peers.sh")
-
-        (info node "ZK ready"))
+       (info node "ZK ready"))
 
       (info node "set up"))
 
@@ -143,14 +139,57 @@
 
 (def ledger-ids (atom []))
 
-(defn bookkeeper-client []
-  #_(obk/bookkeeper (:zookeeper/address env-config) "/ledgers" 60000 30000)
-  (obk/bookkeeper env-config))
+;; Move into own ns
+(def digest-type
+  (BookKeeper$DigestType/MAC))
+
+(def DEFAULT_PASSWORD "password")
+(def ZK_LEDGERS_ROOT_PATH "/ledgers")
+
+(defn password [peer-opts]
+  (.getBytes ^String DEFAULT_PASSWORD))
+
+(defn open-ledger ^org.apache.bookkeeper.client.LedgerHandle [^BookKeeper client id digest-type password]
+  (.openLedger client id digest-type password))
+
+(defn open-ledger-no-recovery ^org.apache.bookkeeper.client.LedgerHandle [^BookKeeper client id digest-type password]
+  (.openLedgerNoRecovery client id digest-type password))
+
+(defn create-ledger ^org.apache.bookkeeper.client.LedgerHandle [^BookKeeper client ensemble-size quorum-size digest-type password]
+  (.createLedger client ensemble-size quorum-size digest-type password))
+
+(defn close-handle [^LedgerHandle ledger-handle]
+  (.close ledger-handle))
+
+(defn new-ledger ^org.apache.bookkeeper.client.LedgerHandle [client peer-opts]
+  (let [ensemble-size (arg-or-default :onyx.bookkeeper/ledger-ensemble-size peer-opts)
+        quorum-size (arg-or-default :onyx.bookkeeper/ledger-quorum-size peer-opts)]
+    (create-ledger client ensemble-size quorum-size digest-type (password peer-opts))))
+
+(defn ^org.apache.bookkeeper.client.BookKeeper bookkeeper
+  ([opts]
+   (bookkeeper (:zookeeper/address opts)
+               ZK_LEDGERS_ROOT_PATH
+               (arg-or-default :onyx.bookkeeper/client-timeout opts)
+               (arg-or-default :onyx.bookkeeper/client-throttle opts)))
+  ([zk-addr zk-root-path timeout throttle]
+   (try
+    (let [conf (doto (ClientConfiguration.)
+                 (.setZkServers zk-addr)
+                 (.setZkTimeout timeout)
+                 (.setThrottleValue throttle)
+                 (.setZkLedgersRootPath zk-root-path))]
+      (BookKeeper. conf))
+    (catch org.apache.zookeeper.KeeperException$NoNodeException nne
+      (throw (ex-info "Error locating BookKeeper cluster via ledger path. Check that BookKeeper has been started via start-env by setting `:onyx.bookkeeper/server? true` in env-config, or is setup at the correct path."
+                      {:zookeeper-addr zk-addr
+                       :zookeeper-path zk-root-path}
+                      nne))))))
 
 (defn read-ledger-entries [ledger-id]
-  (let [client (bookkeeper-client)
-        pwd (obk/password env-config)]
-    (let [ledger-handle (obk/open-ledger client ledger-id obk/digest-type pwd)
+  (let [client (bookkeeper env-config)
+        pwd (password env-config)]
+    (let [ledger-handle (open-ledger client ledger-id digest-type pwd)
           results (try 
                     (let [last-confirmed (.getLastAddConfirmed ledger-handle)]
                       (if-not (neg? last-confirmed)
@@ -175,14 +214,14 @@
 (defrecord WriteLogClient [client ledger-handle]
   client/Client
   (setup! [_ test node]
-    (let [client (bookkeeper-client)
-          lh (obk/new-ledger client env-config)]
+    (let [client (bookkeeper env-config)
+          lh (new-ledger client env-config)]
       (swap! ledger-ids conj (.getId lh))
       (WriteLogClient. client lh)))
 
   (invoke! [this test op]
     (case (:f op)
-      :read-ledger (timeout 500000
+      :read-ledger (timeout 50000
                             (assoc op :type :info :value :timed-out)
                             (try
                               (assoc op 
@@ -193,11 +232,12 @@
       :add (timeout 5000 
                     (assoc op :type :info :value :timed-out)
                     (try
-                      (do 
-                        (info "Adding entry" (:value op))
-                        (.addEntry ledger-handle (nippy/window-log-compress (:value op)))
-                        (info "Done adding entry" (:value op))
-                        (assoc op :type :ok :ledger-id (.getId ledger-handle)))
+                     (do 
+                      (println "Adding entry")
+                      (info "Adding entry" (:value op))
+                      (.addEntry ledger-handle (nippy/window-log-compress (:value op)))
+                      (info "Done adding entry" (:value op))
+                      (assoc op :type :ok :ledger-id (.getId ledger-handle)))
                       (catch Throwable t
                         (assoc op :type :info :value (.getMessage t)))))))
 
@@ -243,11 +283,49 @@
   []
   (gen/clients (gen/once {:type :invoke :f :read-ledger})))
 
+
+(def os
+  (reify os/OS
+    (setup! [_ test node]
+      (info node "setting up debian")
+
+      (c/upload "script/switch_apt_sources.sh" "/switch_apt_sources.sh")
+      (c/exec :chmod "+x" "/switch_apt_sources.sh")
+      (c/exec "/switch_apt_sources.sh")
+
+      (debian/setup-hostfile!)
+
+      (debian/maybe-update!)
+
+      (c/su
+       ; Packages!
+       (debian/install [:wget
+                        :sysvinit-core
+                        :sysvinit
+                        :sysvinit-utils
+                        :curl
+                        :vim
+                        :man-db
+                        :faketime
+                        :unzip
+                        :iptables
+                        :psmisc
+                        :iputils-ping
+                        :rsyslog
+                        :logrotate])
+
+       ; Fucking systemd breaks a bunch of packages
+       (if (debian/installed? :systemd)
+         (c/exec :apt-get :remove :-y :--purge :--auto-remove :systemd)))
+
+      (meh (net/heal)))
+    (teardown! [_ test node])))
+
 (defn basic-test
   "A simple test of Onyx's safety."
-  [version]
+  [{:keys [version awake-ms stopped-ms time-limit]}]
   (merge tests/noop-test
-         {:os debian/os
+         {:os os ;debian/os
           :db (setup version)
           :client (write-log-client)
           :model model/noop
@@ -258,11 +336,11 @@
                             (gen/delay 1)
                             (gen/nemesis
                               (gen/seq (cycle
-                                         [(gen/sleep 30)
+                                         [(gen/sleep awake-ms)
                                           {:type :info :f :start}
-                                          (gen/sleep 200)
+                                          (gen/sleep stopped-ms)
                                           {:type :info :f :stop}])))
-                            (gen/time-limit 400)) 
+                            (gen/time-limit time-limit)) 
                        (read-ledger))
           ;:nemesis (nemesis/partitioner (comp nemesis/bridge shuffle))
           :nemesis (nemesis/partition-random-halves)}))

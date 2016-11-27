@@ -9,6 +9,7 @@ N1_IP=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' n1)
 
 sleep 10
 
+## multiple apt-get installs due to flaky docker networking
 ssh -oStrictHostKeyChecking=no $N1_IP "rm /etc/apt/apt.conf.d/docker-clean && apt-get update && \
 apt-get install -y sudo net-tools wget sysvinit-core sysvinit sysvinit-utils curl vim man man-db faketime unzip iptables iputils-ping logrotate zookeeper zookeeperd zookeeper-bin || \
 apt-get install -y sudo net-tools wget sysvinit-core sysvinit sysvinit-utils curl vim man man-db faketime unzip iptables iputils-ping logrotate zookeeper zookeeperd zookeeper-bin || \
