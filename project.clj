@@ -5,6 +5,7 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.8.0"]
                  ;[org.slf4j/slf4j-nop "1.7.21"]
+                 [com.taoensso/nippy "2.12.2"]
                  [org.apache.bookkeeper/bookkeeper-server "4.4.0" :exclusions [[org.slf4j/slf4j-log4j12]]]
                  [jepsen "0.1.1"]]
   :test-selectors {:jepsen :jepsen

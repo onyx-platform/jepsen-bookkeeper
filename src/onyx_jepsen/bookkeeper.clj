@@ -7,10 +7,7 @@
             [clojure.string :as str]
             [clojure.pprint :refer [pprint]]
 
-            ;; Onyx!
-            [onyx.static.default-vals :refer [arg-or-default defaults]]
-            [onyx.state.log.bookkeeper :as obk]
-            [onyx.compression.nippy :as nippy]                                                                                                             
+            [taoensso.nippy :as nippy]
             [knossos.op :as op]
             [jepsen.control.util]
 
@@ -33,8 +30,7 @@
             [jepsen.os.debian :as debian])
 
   (:import [org.apache.bookkeeper.client LedgerHandle LedgerEntry BookKeeper BookKeeper$DigestType AsyncCallback$AddCallback BKException BKException$Code AsyncCallback$AddCallback]
-           [org.apache.bookkeeper.conf ClientConfiguration]
-           [org.apache.curator.framework CuratorFramework CuratorFrameworkFactory]))
+           [org.apache.bookkeeper.conf ClientConfiguration]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; BookKeeper only test code
@@ -74,10 +70,11 @@
                                               (:nodes test)))))
 
 (def bk-ledger-path
-  (str "zkLedgersRootPath=/ledgers" #_(:onyx/tenancy-id env-config)))
+  (str "zkLedgersRootPath=/ledgers"))
 
+;; Setup appears to be broken as entry writes are timing out
 (defn setup 
-  "Sets up and tears down Onyx"
+  "Sets up and tears down BookKeeper"
   [version]
   (reify db/DB
     (setup! [_ test node]
@@ -89,9 +86,11 @@
        (c/exec :apt-get :update)
 
        ;; Disable non-embedded BookKeeper
+       (info "Uploading and then unzipping")
        (c/upload "bookkeeper-server-4.4.0-bin.tar.gz" "/bookkeeper.tar.gz")
        (c/exec :tar "zxvf" "/bookkeeper.tar.gz")
        (c/exec :mv "bookkeeper-server-4.4.0" "/bookkeeper-server")
+       (info "Uploading and then unzipping")
 
        (c/upload "script/upgrade-java.sh" "/upgrade-java.sh")
        (c/exec :chmod "+x" "/upgrade-java.sh")
@@ -161,18 +160,24 @@
 (defn close-handle [^LedgerHandle ledger-handle]
   (.close ledger-handle))
 
+;; FIXME supply via test config
+(def ledger-ensemble-size 3)
+(def ledger-quorum-size 3)
+
 (defn new-ledger ^org.apache.bookkeeper.client.LedgerHandle [client peer-opts]
-  (let [ensemble-size (arg-or-default :onyx.bookkeeper/ledger-ensemble-size peer-opts)
-        quorum-size (arg-or-default :onyx.bookkeeper/ledger-quorum-size peer-opts)]
-    (create-ledger client ensemble-size quorum-size digest-type (password peer-opts))))
+  (create-ledger client ledger-ensemble-size ledger-quorum-size digest-type (password peer-opts)))
 
 (defn ^org.apache.bookkeeper.client.BookKeeper bookkeeper
   ([opts]
    (bookkeeper (:zookeeper/address opts)
                ZK_LEDGERS_ROOT_PATH
-               (arg-or-default :onyx.bookkeeper/client-timeout opts)
-               (arg-or-default :onyx.bookkeeper/client-throttle opts)))
+               (:bookkeeper/client-timeout opts)
+               (:bookkeeper/client-throttle opts)))
   ([zk-addr zk-root-path timeout throttle]
+   (assert zk-addr)
+   (assert zk-root-path)
+   (assert timeout)
+   (assert throttle)
    (try
     (let [conf (doto (ClientConfiguration.)
                  (.setZkServers zk-addr)
@@ -196,7 +201,7 @@
                         (loop [results [] 
                                entries (.readEntries ledger-handle 0 last-confirmed)
                                element ^LedgerEntry (.nextElement entries)] 
-                          (let [new-results (conj results (nippy/window-log-decompress (.getEntry element)))] 
+                          (let [new-results (conj results (nippy/fast-freeze (.getEntry element)))] 
                             (if (.hasMoreElements entries)
                               (recur new-results entries (.nextElement entries))
                               new-results)))
@@ -224,22 +229,25 @@
       :read-ledger (timeout 50000
                             (assoc op :type :info :value :timed-out)
                             (try
-                              (assoc op 
-                                     :type :ok 
-                                     :value (mapv read-ledger-entries @ledger-ids))
-                              (catch Throwable t
-                                (assoc op :type :info :value t))))
+                             (assoc op 
+                                    :type :ok 
+                                    :value (mapv read-ledger-entries @ledger-ids))
+                             (catch Throwable t
+                               (assoc op :type :info :value t))))
+
+      ;; FIXME
+      ;; BookKeeper setup appears to be broken as entry writes are timing out
       :add (timeout 5000 
                     (assoc op :type :info :value :timed-out)
                     (try
                      (do 
-                      (println "Adding entry")
+                      (println "Adding entry" (:value op))
                       (info "Adding entry" (:value op))
-                      (.addEntry ledger-handle (nippy/window-log-compress (:value op)))
+                      (.addEntry ledger-handle (nippy/fast-thaw (:value op)))
                       (info "Done adding entry" (:value op))
                       (assoc op :type :ok :ledger-id (.getId ledger-handle)))
-                      (catch Throwable t
-                        (assoc op :type :info :value (.getMessage t)))))))
+                     (catch Throwable t
+                       (assoc op :type :info :value (.getMessage t)))))))
 
   (teardown! [_ test]
     (.close client)))
@@ -325,7 +333,7 @@
   "A simple test of BookKeeper's safety."
   [{:keys [version awake-ms stopped-ms time-limit]}]
   (merge tests/noop-test
-         {:os os ;debian/os
+         {:os os
           :db (setup version)
           :client (write-log-client)
           :model model/noop
