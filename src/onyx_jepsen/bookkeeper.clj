@@ -289,9 +289,9 @@
     (setup! [_ test node]
       (info node "setting up debian")
 
-      (c/upload "script/switch_apt_sources.sh" "/switch_apt_sources.sh")
-      (c/exec :chmod "+x" "/switch_apt_sources.sh")
-      (c/exec "/switch_apt_sources.sh")
+      ;(c/upload "script/switch_apt_sources.sh" "/switch_apt_sources.sh")
+      ;(c/exec :chmod "+x" "/switch_apt_sources.sh")
+      ;(c/exec "/switch_apt_sources.sh")
 
       (debian/setup-hostfile!)
 
@@ -322,7 +322,7 @@
     (teardown! [_ test node])))
 
 (defn basic-test
-  "A simple test of Onyx's safety."
+  "A simple test of BookKeeper's safety."
   [{:keys [version awake-ms stopped-ms time-limit]}]
   (merge tests/noop-test
          {:os os ;debian/os

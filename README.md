@@ -45,7 +45,7 @@ script/start-containers.sh
 script/run-test-start-in-docker.sh TEST_NS
 ```
 
-Where TEST_NS is currently either `onyx-jepsen.onyx-basic-test` or `onyx-jepsen.onyx-aggregation-test`.
+Where TEST_NS is `onyx-jepsen.bookkeeper-test`.
 
 When running a new test, exit the docker instance, and restart the process from
 4. The docker containers have everything setup perfectly so that nothing needs
@@ -57,36 +57,6 @@ clean up after itself so a new container must be started before running a new te
 onyx-jepsen uses a custom jepsen docker image built specifically to test Onyx.
 This includes pre-installed ZooKeeper. See the README in the docker directory
 for more details.
-
-## Notes
-
-Uses peers with the following configuration to avoid resource starvation running on a single machine:
-
--D"aeron.client.liveness.timeout=50000000000" -D"aeron.threading.mode=SHARED" -server -XX:+UseG1GC 
-
-See script/run-peers.sh for settings.
-
-## Jepsen Memorial Box
-
-A memorial to those bugs destroyed by Jepsen, or at large, so far:
-
-BookKeeper:
-
-* [Document that BookKeeper servers will shutdown on losing quorum](https://issues.apache.org/jira/browse/BOOKKEEPER-882) Unresolved.
-
-onyx:
-
-* [Peer join race condition #453](https://github.com/onyx-platform/onyx/issues/453) Resolved.
-* [Peers that crash on component/start will not reboot #437] (https://github.com/onyx-platform/onyx/issues/437) Resolved. 
-* [Ensure peer restarts after ZooKeeper connection loss/errors #423] (https://github.com/onyx-platform/onyx/issues/423) Resolved.
-* [BookKeeper state log / key filter interaction issue #382] (https://github.com/onyx-platform/onyx/issues/382) Known, but theoretical issue, proven to be an issue by jepsen. Resolved.
-* [Failed async BookKeeper writes should cause peer to to restart #390] (https://github.com/onyx-platform/onyx/issues/390) Known issue, but shown to be resolved by jepsen.
-* [Boot out dead peers when the replica doesn't reflect the cluster state. #526](https://github.com/onyx-platform/onyx/pull/526) Kill -9 test 
-
-onyx-bookkeeper plugin:
-* [Handle case where peer is restored, but all messages fully acked #4] (https://github.com/onyx-platform/onyx-bookkeeper/issues/4) Unresolved, low priority.
-* [Plugin should wait until producer channel has completely finished #3] (https://github.com/onyx-platform/onyx-bookkeeper/issues/3) Resolved.
-* [Plugins using producer threads must be able to pass exceptions back to task #435](https://github.com/onyx-platform/onyx/issues/435) Resolved in onyx-bookkeeper, also fixed in onyx-datomic, onyx-seq, onyx-kafka.
 
 ## License
 
